@@ -95,7 +95,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 88 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 89 as const;
+// 89: Read image tool results may carry durable `session_context` refs.
 // 88: Catalog model modalities admit video on either side and pdf as output.
 // models.dev declares both, and the modality decoder rejects any value it does
 // not name, so a newer Host describing such a model fails an older client's
