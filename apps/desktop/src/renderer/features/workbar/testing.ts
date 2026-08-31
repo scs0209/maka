@@ -138,6 +138,7 @@ export function createFakeWorkbarServices(
       respondToSandboxBoundary: async () => undefined,
       respondToClientCapability: async () => undefined,
       respondToUserQuestion: async () => undefined,
+      respondToUserForm: async () => undefined,
       subscribeEvents: (_sessionId, _handler, onSeeded) => {
         onSeeded?.();
         return noopSubscription();
