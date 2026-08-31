@@ -107,6 +107,7 @@ import {
   createMakaPiTranscriptState,
   hasRunningUserCommand,
   activeSandboxBoundaryRequest,
+  activeFormRequest,
   activeUserQuestionRequest,
   applyExpansionDefaultToAll,
   completePendingInteraction,
@@ -123,6 +124,8 @@ import {
   type ExpansionEntryKind,
   type MakaPiTranscriptMetadata,
 } from './pi-transcript.js';
+import { FormInteractionOverlay } from './pi-tui-form-interaction.js';
+import type { InteractionFormResponse } from '@maka/core/interaction';
 import { runMakaPiTuiTurn, type MakaPiTuiTurnRequest } from './pi-tui-turn.js';
 import { editorTheme, selectListTheme } from './tui-ansi.js';
 import { MakaAutocompleteAboveEditorComponent } from './tui-autocomplete-layout.js';
@@ -491,6 +494,10 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         answers: Array<string | null>;
       }
     | undefined;
+  let formResponseInFlightRequestId: string | undefined;
+  let formOverlay: OverlayHandle | undefined;
+  let formOverlayComponent: FormInteractionOverlay | undefined;
+  let formOverlayRequestId: string | undefined;
   let turnRunning = false;
   // Monotonic generation for visible agent turns. A mid-turn `/session`
   // switch-away (#3380) bumps it to orphan the in-flight drain: every callback
@@ -701,7 +708,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         return;
       }
       permissionResponseInFlightRequestId = null;
-      syncUserQuestionOverlay();
+      syncInteractionOverlays();
       requestRender();
     }) ?? (() => {});
   const unsubscribeTranscriptReplacements =
@@ -709,6 +716,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       if (closed || input.driver.getSessionId() !== sessionId) return;
       if (reason === 'reconnect') {
         replaceTranscript(messages, { preserveClientLocalEntries: true });
+        syncInteractionOverlays();
         shellRunElapsedTicker.sync();
         requestRender();
         const messageIds = state.entries.flatMap((entry) =>
@@ -1393,6 +1401,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
           replaceTranscript(authoritativeAttachedTurn.messages, {
             preserveClientLocalEntries: true,
           });
+          syncInteractionOverlays();
           shellRunHydration.reset();
           if (input.listShellRunUpdates) {
             await shellRunHydration.hydrate(authoritativeAttachedTurn.sessionId);
@@ -1415,7 +1424,9 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         // not reach the adopted Session's transcript or overlays.
         if (superseded()) return;
         if (
-          (event.type === 'sandbox_boundary_request' || event.type === 'user_question_request') &&
+          (event.type === 'sandbox_boundary_request' ||
+            event.type === 'user_question_request' ||
+            event.type === 'form_request') &&
           resolvedInteractionIds.delete(event.requestId)
         ) {
           return;
@@ -1440,7 +1451,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
           permissionAlerted = false;
         }
         shellRunElapsedTicker.sync();
-        syncUserQuestionOverlay();
+        syncInteractionOverlays();
         requestRender();
       },
       // A turn failing is worth pulling the user back, regardless of how long it
@@ -1454,7 +1465,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         appendTurnFailureToTranscript(state, error);
         attention.attentionNeeded();
         shellRunElapsedTicker.sync();
-        syncUserQuestionOverlay();
+        syncInteractionOverlays();
         requestRender();
       },
     }).then(
@@ -1647,6 +1658,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   }: MakaSessionSwitchResult): Promise<void> => {
     adoptSessionMetadata(summary, false);
     replaceTranscript(messages);
+    syncInteractionOverlays();
     if (connectionIdentityNotice) {
       state.entries.push({ kind: 'notice', level: 'error', text: connectionIdentityNotice });
     }
@@ -2035,13 +2047,13 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
           completePendingInteraction(state, requestId);
         }
         userQuestionProgress = undefined;
-        syncUserQuestionOverlay();
+        syncInteractionOverlays();
         requestRender();
       })
       .catch((error) => {
         userQuestionInFlight = false;
         reportError(error);
-        syncUserQuestionOverlay();
+        syncInteractionOverlays();
       });
   };
 
@@ -2090,6 +2102,75 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       };
       showUserQuestion();
     }
+  };
+
+  const closeFormOverlay = (): void => {
+    formOverlay?.hide();
+    formOverlay = undefined;
+    formOverlayComponent = undefined;
+    formOverlayRequestId = undefined;
+  };
+
+  const finishUserForm = (response: InteractionFormResponse): void => {
+    if (formResponseInFlightRequestId) return;
+    const respond = input.driver.respondToUserForm;
+    if (!respond) {
+      formOverlayComponent?.setSubmissionFailed();
+      reportError(new Error('User forms are unavailable on this driver.'));
+      return;
+    }
+    formResponseInFlightRequestId = response.requestId;
+    void respond
+      .call(input.driver, response)
+      .then(() => {
+        if (formResponseInFlightRequestId === response.requestId) {
+          formResponseInFlightRequestId = undefined;
+        }
+        if (activeFormRequest(state)?.requestId === response.requestId) {
+          completePendingInteraction(state, response.requestId);
+        }
+        closeFormOverlay();
+        syncInteractionOverlays();
+        requestRender();
+      })
+      .catch((error) => {
+        if (formResponseInFlightRequestId === response.requestId) {
+          formResponseInFlightRequestId = undefined;
+        }
+        if (
+          activeFormRequest(state)?.requestId === response.requestId &&
+          formOverlayRequestId === response.requestId
+        ) {
+          formOverlayComponent?.setSubmissionFailed();
+        } else {
+          closeFormOverlay();
+          syncInteractionOverlays();
+        }
+        reportError(error);
+        requestRender();
+      });
+  };
+
+  const syncFormOverlay = (): void => {
+    const request = activeFormRequest(state);
+    if (!request) {
+      closeFormOverlay();
+      return;
+    }
+    if (formOverlayRequestId !== request.requestId) closeFormOverlay();
+    if (formResponseInFlightRequestId || formOverlayComponent) return;
+    formOverlayComponent = new FormInteractionOverlay(tui, {
+      locale,
+      request,
+      onRespond: finishUserForm,
+    });
+    formOverlayRequestId = request.requestId;
+    formOverlay = showBottomPicker(formOverlayComponent);
+  };
+
+  const syncInteractionOverlays = (): void => {
+    syncUserQuestionOverlay();
+    syncFormOverlay();
   };
 
   const showSelectPicker = (
@@ -2462,7 +2543,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       for await (const event of input.driver.resumeLatest()) {
         applyMakaSessionEventToTranscript(state, event);
         shellRunElapsedTicker.sync();
-        syncUserQuestionOverlay();
+        syncInteractionOverlays();
         requestRender();
       }
     } catch (error) {
@@ -2688,6 +2769,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     // session, send a prompt to begin" cue. A notice here would make entries
     // non-empty and suppress it.
     replaceTranscript([]);
+    syncInteractionOverlays();
     shellRunElapsedTicker.sync();
     await discardCurrentSidePair();
     requestRender();
@@ -3741,7 +3823,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       return { consume: true };
     }
     if (
-      activeUserQuestionRequest(state) &&
+      (activeUserQuestionRequest(state) || activeFormRequest(state)) &&
       turnRunning &&
       matchesKey(data, Key.ctrl('c')) &&
       !isKeyRepeat(data)

@@ -2089,7 +2089,7 @@ describe('Maka Pi TUI transcript', () => {
     assert.ok(visibleLines.every((line) => !line.includes(' a ')));
   });
 
-  test('queues sandbox boundary and user-question requests in arrival order', () => {
+  test('queues sandbox boundary, question, and form requests in arrival order', () => {
     const state = createMakaPiTranscriptState();
     applyMakaSessionEventToTranscript(
       state,
@@ -2108,6 +2108,17 @@ describe('Maka Pi TUI transcript', () => {
     applyMakaSessionEventToTranscript(
       state,
       event({
+        type: 'form_request',
+        requestId: 'form-1',
+        toolUseId: 'tool-3',
+        message: 'Configure deployment',
+        requester: { name: 'deploy', source: 'Acme MCP' },
+        fields: [{ kind: 'boolean', name: 'notify', label: 'Notify', required: false }],
+      }),
+    );
+    applyMakaSessionEventToTranscript(
+      state,
+      event({
         type: 'user_question_request',
         requestId: 'question-1',
         toolUseId: 'tool-2',
@@ -2118,7 +2129,7 @@ describe('Maka Pi TUI transcript', () => {
     assert.equal(state.pendingInteraction?.requestId, 'boundary-1');
     assert.deepEqual(
       state.queuedInteractions.map((item) => item.requestId),
-      ['question-1'],
+      ['form-1', 'question-1'],
     );
 
     applyMakaSessionEventToTranscript(
@@ -2132,7 +2143,25 @@ describe('Maka Pi TUI transcript', () => {
         revision: 1,
       }),
     );
+    assert.equal(state.pendingInteraction?.requestId, 'form-1');
+    applyMakaSessionEventToTranscript(
+      state,
+      event({
+        type: 'form_answer_ack',
+        requestId: 'form-1',
+        toolUseId: 'tool-3',
+      }),
+    );
     assert.equal(state.pendingInteraction?.requestId, 'question-1');
+    applyMakaSessionEventToTranscript(
+      state,
+      event({
+        type: 'user_question_answer_ack',
+        requestId: 'question-1',
+        toolUseId: 'tool-2',
+      }),
+    );
+    assert.equal(state.pendingInteraction, undefined);
     assert.deepEqual(state.queuedInteractions, []);
   });
 
