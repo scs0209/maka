@@ -14742,6 +14742,7 @@ function testInteractionAuthority(): RuntimeInteractionAuthority {
       acceptSandboxBoundaryRequest: async () => {},
       acceptUserQuestionRequest: async () => {},
       acceptFormRequest: async () => {},
+      withdrawFormRequest: async () => {},
       close: async () => {},
       release: () => {},
     }),
