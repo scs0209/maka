@@ -95,7 +95,9 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 88 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 89 as const;
+// 89: accepted Client Capability invocations may carry one bounded nested form
+// Interaction request/result round trip.
 // 88: Session Interaction snapshots and forwarded Runtime events may carry the
 // provider-neutral `form` request/answer contract.
 // 87: The connection catalog projects each model as the Host resolved it —
