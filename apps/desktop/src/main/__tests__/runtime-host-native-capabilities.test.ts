@@ -597,6 +597,7 @@ test('forwards Host cancellation to an admitted Desktop invocation', async () =>
   const inFlight = provider.call(capabilityFrame(), {
     signal: controller.signal,
     accept: async () => undefined,
+    requestInteraction: async () => assert.fail('Unexpected provider interaction'),
   });
 
   await started;
@@ -718,5 +719,6 @@ async function call(
   return provider.call(frame, {
     signal: new AbortController().signal,
     accept: async (evidence) => accept(evidence),
+    requestInteraction: async () => assert.fail('Unexpected provider interaction'),
   });
 }
