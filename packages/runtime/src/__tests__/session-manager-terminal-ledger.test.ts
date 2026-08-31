@@ -2672,6 +2672,7 @@ function hostedInteractionAuthority(): RuntimeInteractionAuthority {
       ...identity,
       acceptSandboxBoundaryRequest: async () => {},
       acceptUserQuestionRequest: async () => {},
+      acceptFormRequest: async () => {},
       close: async () => {},
       release: () => {},
     }),
