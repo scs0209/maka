@@ -826,7 +826,6 @@ function AppShellContent({
     [sessions, onboarding.snapshot?.sessionSendOutcomes],
   );
   const activeInteraction = activeInteractionFor(interactionBySession, ownerActiveId);
-  const activeForm = activeInteraction?.type === 'form_request' ? activeInteraction : undefined;
   const activeSession = activeCatalogSession;
   const activeMessageQueue = activeId ? messageQueueBySession[activeId] : undefined;
   const activeMessageSubmitting = transientMessages.length > 0;
@@ -1848,6 +1847,7 @@ function AppShellContent({
     setInteractionBySession: sessionUiController.setInteractionBySession,
     onInteractionChanged: markInteractionChanged,
     onExecutionBoundaryChanged: reloadActiveExecutionBoundary,
+    respondToUserForm: workbar.commands.respondToUserForm,
     showModelSetupToast,
     toastApi,
     newChatModel: newChatModel ?? null,
@@ -2970,7 +2970,6 @@ function AppShellContent({
                   respondToSandboxBoundary={respondToSandboxBoundary}
                   respondToClientCapability={workbar.commands.respondToClientCapability}
                   respondToUserQuestion={respondToUserQuestion}
-                  activeForm={activeForm}
                   respondToUserForm={respondToUserForm}
                   stop={stop}
                   directoryComposerProps={directoryComposerProps}
