@@ -196,6 +196,7 @@ export type ConnectRemoteRuntimeHostResult =
         | 'unreachable'
         | 'connect_failed'
         | 'handshake_failed'
+        | 'handshake_timed_out'
         | 'root_mismatch'
         | 'composition_mismatch';
     };
@@ -1035,11 +1036,13 @@ export async function connectRuntimeHostMessageTransport(
 ): Promise<ConnectRemoteRuntimeHostResult> {
   let resourceTransferred = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let handshakeTimedOut = false;
   try {
     const normalized = normalizeConnectRuntimeHostInput(input);
     const compositionId = requireHostCompositionId(input.compositionId);
     const expectedRootId = requireHostRootId(input.expectedRootId);
     timer = setTimeout(() => {
+      handshakeTimedOut = true;
       input.transport.abort(new Error('Timed out handshaking with Runtime Host'));
     }, normalized.handshakeTimeoutMs);
     const result = await exchangeRuntimeHostHandshake({
@@ -1067,7 +1070,10 @@ export async function connectRuntimeHostMessageTransport(
     if (error instanceof RuntimeHostCompositionMismatchError) {
       return { kind: 'unavailable', reason: 'composition_mismatch' };
     }
-    return { kind: 'unavailable', reason: 'handshake_failed' };
+    return {
+      kind: 'unavailable',
+      reason: handshakeTimedOut ? 'handshake_timed_out' : 'handshake_failed',
+    };
   } finally {
     if (timer) clearTimeout(timer);
     if (!resourceTransferred) await input.connectionResource?.close().catch(() => undefined);
