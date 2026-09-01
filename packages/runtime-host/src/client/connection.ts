@@ -493,7 +493,6 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
         ...(isDomainRequest ? { domainState: 'queued' as const } : {}),
         timer,
       });
-      this.#scheduleLivenessCheck();
     });
     const frame = {
       requestId,
@@ -695,7 +694,6 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       if (retired?.operation === frame.operation) {
         this.#retiredRequests.delete(frame.requestId);
         this.#releaseDomainSlot(retired);
-        this.#scheduleLivenessCheck();
         return;
       }
       this.#fail(new Error('Runtime Host returned an unmatched operation response'));
@@ -707,7 +705,6 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     }
     this.#pendingRequests.delete(frame.requestId);
     if (pending.timer) clearTimeout(pending.timer);
-    this.#scheduleLivenessCheck();
     if (frame.ok) {
       try {
         const accepted = pending.accept(frame.result);
@@ -776,7 +773,6 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       pending.reject(
         interruptedRequestError(pending.operation, 'not_dispatched', 'timeout', error),
       );
-      this.#scheduleLivenessCheck();
       return;
     }
     this.#retiredRequests.set(requestId, {
@@ -784,7 +780,6 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       ...(pending.domainState === 'in_flight' ? { domainState: pending.domainState } : {}),
     });
     pending.reject(interruptedRequestError(pending.operation, 'dispatched', 'timeout', error));
-    this.#scheduleLivenessCheck();
   }
 
   #releaseDomainSlot(request: PendingRequest | RetiredRequest): void {
