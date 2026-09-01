@@ -386,8 +386,8 @@
           "@maka/runtime/skill-invocation": 1,
           "@maka/ui": 1
         },
-        "importSpecifiers": 39,
-        "nonTriviaTokens": 4278
+        "importSpecifiers": 38,
+        "nonTriviaTokens": 4275
       },
       "src/renderer/app-shell-chrome-actions.tsx": {
         "importDeclarations": 5,
@@ -711,7 +711,7 @@
           "@maka/ui": 1
         },
         "importSpecifiers": 21,
-        "nonTriviaTokens": 2974
+        "nonTriviaTokens": 2976
       },
       "src/renderer/app-shell-session-settings-actions.ts": {
         "importDeclarations": 9,
@@ -1060,7 +1060,7 @@
           "react": 1
         },
         "importSpecifiers": 186,
-        "nonTriviaTokens": 15825
+        "nonTriviaTokens": 15840
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 3,
