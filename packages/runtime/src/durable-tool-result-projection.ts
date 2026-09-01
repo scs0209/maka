@@ -182,7 +182,7 @@ export function durableProjectionToToolResultOutput(
  * selected model — sizing may not read the model, and over-counting only
  * triggers compaction.
  */
-const PROJECTION_ARTIFACT_IMAGE_TOKENS = 2_000;
+export const MATERIALIZED_IMAGE_TOKENS = 2_000;
 
 /** One image a Tool Result puts in the request. */
 export interface MaterializedToolResultMedia {
@@ -230,7 +230,7 @@ export function effectiveToolResultMedia(
 
 /** Tokens the artifact parts of one projection cost once materialized. */
 export function estimateProjectionMediaTokens(projection: DurableToolResultProjection): number {
-  return projectionArtifactMedia(projection).length * PROJECTION_ARTIFACT_IMAGE_TOKENS;
+  return projectionArtifactMedia(projection).length * MATERIALIZED_IMAGE_TOKENS;
 }
 
 /** Tokens the images of one decoded Tool Result cost once materialized. */
@@ -238,7 +238,7 @@ export function estimateEffectiveMediaTokens(
   effective: EffectiveToolResultProjection,
   sessionId: string,
 ): number {
-  return effectiveToolResultMedia(effective, sessionId).length * PROJECTION_ARTIFACT_IMAGE_TOKENS;
+  return effectiveToolResultMedia(effective, sessionId).length * MATERIALIZED_IMAGE_TOKENS;
 }
 
 /**
