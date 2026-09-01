@@ -57,7 +57,6 @@ import type {
   AttachmentRef,
   DirectoryReference,
   QuoteRef,
-  ContextBudgetExhaustedDetail,
 } from '@maka/core/events';
 import type {
   StoredMessage,
@@ -167,6 +166,7 @@ import { persistedOpenAiResponsesStepMessages } from './openai-responses-continu
 import type { OpenAiResponsesTransportState } from './openai-responses-websocket.js';
 import {
   composeRequestProjection,
+  type DispatchRequestShape,
   type RequestProjection,
   type RequestProjectionContext,
   type RequestProjectionStage,
@@ -182,6 +182,7 @@ import { compactionDecisionDiagnosticPatch } from './compaction-boundary.js';
 import type {
   AutomaticMemoryCompactionDecision,
   AutomaticMemoryCompactionDispatch,
+  MidTurnCapacityCompactState,
   ProviderImageBudget,
 } from './ai-sdk-compaction.js';
 import {
@@ -278,7 +279,6 @@ import {
   projectHistoryCompactCheckpointReplay,
   type HistoryCompactCheckpoint,
 } from './history-compact-checkpoint.js';
-import { isMalformedHistoryCompactSummaryReason } from './history-compact-error.js';
 import { resolveSelectedModelContextWindow } from './context-budget-policy.js';
 export {
   DEFAULT_PERMISSION_TIMEOUT_MS,
@@ -1709,6 +1709,7 @@ export class AiSdkBackend implements AgentBackend {
     const priorReplayResult = await this.buildPriorMessages(
       scope,
       input,
+      midTurnState,
       this.automaticMemoryCompactionSupported() ? true : undefined,
     );
     if (scope.aborted) {
@@ -1934,14 +1935,11 @@ export class AiSdkBackend implements AgentBackend {
             patch,
           );
         };
-        const midTurnSystemPromptChars = systemPrompt?.length ?? 0;
         const midTurnCapacityHook = this.compaction.buildMidTurnCapacityCompactProjection(
           turnId,
           midTurnState,
           queue,
           providerTools,
-          () => currentRepairToolNames(),
-          midTurnSystemPromptChars,
           onMidTurnDiagnosticPatch,
           scope,
           this.automaticMemoryCompactionSupported()
@@ -1983,9 +1981,7 @@ export class AiSdkBackend implements AgentBackend {
                 )!,
                 state: midTurnState,
                 providerTools,
-                fallbackActiveTools: () => currentRepairToolNames(),
                 charsPerToken: this.input.contextBudget?.charsPerToken ?? 4,
-                systemPromptChars: midTurnSystemPromptChars,
               })
             : shapedProjection;
 
@@ -2008,15 +2004,10 @@ export class AiSdkBackend implements AgentBackend {
             if (missingSteering.length > 0)
               requestMessages = [...requestMessages, ...missingSteering];
           }
-          const shaped = requestProjection
-            ? await requestProjection({
-                completedSteps: completedProviderSteps,
-                stepNumber: runtimeSteps,
-                model,
-                messages: requestMessages,
-              })
-            : undefined;
-          const projectedMessages = shaped?.messages ?? requestMessages;
+          // Resolved BEFORE request projection so the capacity measurement and
+          // the request that goes out are the same request: a finalization step
+          // adds prompt fragments and sends no tool schemas, and an anchor
+          // paired with the un-finalized shape describes a different payload.
           const finalChildSummaryStep =
             this.input.header.collaborationMode === 'agent' &&
             maxSteps !== undefined &&
@@ -2031,16 +2022,32 @@ export class AiSdkBackend implements AgentBackend {
           if (sandboxBoundaryFinalizationStep) {
             toolRuntime.forceSandboxBoundaryFinalization();
           }
-          const activeToolsForRequest =
-            finalChildSummaryStep || sandboxBoundaryFinalizationStep
-              ? []
-              : boundaryAwareToolNames(shaped?.activeTools ?? plan.currentRepairToolNames());
           const requestSystemPrompt = joinPromptFragments([
             systemPrompt,
             finalChildSummaryStep ? CHILD_STEP_BUDGET_FINALIZATION_PROMPT : undefined,
             toolRuntime.hasSandboxBoundaryDenial() ? SANDBOX_BOUNDARY_DENIED_FOR_TURN : undefined,
             sandboxBoundaryFinalizationStep ? SANDBOX_BOUNDARY_FINALIZATION_PROMPT : undefined,
           ]);
+          const resolveDispatch = (
+            active: readonly string[] | undefined,
+          ): DispatchRequestShape => ({
+            systemPromptChars: requestSystemPrompt?.length ?? 0,
+            activeTools:
+              finalChildSummaryStep || sandboxBoundaryFinalizationStep
+                ? []
+                : boundaryAwareToolNames(active ?? plan.currentRepairToolNames()),
+          });
+          const shaped = requestProjection
+            ? await requestProjection({
+                completedSteps: completedProviderSteps,
+                stepNumber: runtimeSteps,
+                model,
+                messages: requestMessages,
+                resolveDispatch,
+              })
+            : undefined;
+          const projectedMessages = shaped?.messages ?? requestMessages;
+          const activeToolsForRequest = resolveDispatch(shaped?.activeTools).activeTools;
           providerRequestTracker?.setStep(runtimeSteps);
           let attemptMessages = projectedMessages;
           let providerAttempt = 1;
@@ -2403,7 +2410,7 @@ export class AiSdkBackend implements AgentBackend {
                       currentMessages: attemptMessages,
                       providerTools,
                       activeTools: activeToolsForRequest,
-                      systemPromptChars: midTurnSystemPromptChars,
+                      systemPromptChars: requestSystemPrompt?.length ?? 0,
                       queue,
                       onDiagnosticPatch: onMidTurnDiagnosticPatch,
                       origin: scope,
@@ -2431,6 +2438,7 @@ export class AiSdkBackend implements AgentBackend {
                       model,
                       messages: recovered.messages,
                       activeTools: activeToolsForRequest,
+                      resolveDispatch,
                     })
                   : undefined;
                 attemptMessages = recoveredProjection?.messages ?? recovered.messages;
@@ -3350,6 +3358,7 @@ export class AiSdkBackend implements AgentBackend {
   private async buildPriorMessages(
     scope: TurnScope,
     input: BackendSendInput,
+    midTurnState: MidTurnCapacityCompactState | undefined,
     automaticMemory?: true,
   ): Promise<PriorReplayResult> {
     const priorStored = input.context.filter((message) => message.turnId !== input.turnId);
@@ -3400,7 +3409,20 @@ export class AiSdkBackend implements AgentBackend {
     }
 
     const maxHistoryTokens = contextBudget?.maxHistoryEstimatedTokens;
+    // FALLBACK, not a second authority. When this turn's first request can be
+    // estimated from a persisted anchor against a declared window, step 0's
+    // anchored estimate is the only trigger: it measures the whole outgoing
+    // payload (system prompt, tool schemas, media) against the real window,
+    // where this gate only weighs prior history events at chars/4 against a
+    // shaping threshold. The gate still stands in for the cases that estimate
+    // cannot reach — no anchor, no mid-turn seam, or a model that declares no
+    // window — where an oversized history would otherwise go out unshaped.
+    const turnStartAnchored =
+      midTurnState !== undefined &&
+      midTurnState.capacity !== undefined &&
+      midTurnState.lastRequestInputTokens !== undefined;
     const needsCompaction =
+      !turnStartAnchored &&
       maxHistoryTokens !== undefined &&
       estimateRuntimeEventsTokens(runtimeContext, contextBudget?.charsPerToken) > maxHistoryTokens;
     if (

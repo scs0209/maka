@@ -62,6 +62,7 @@ const RAW_SPAN_TWO = 'RAW_SPAN_TWO_'.repeat(160);
 const ROLLING_TAIL = 'ROLLING_TAIL_'.repeat(740);
 const HUGE_RESULT = 'HUGE_RESULT_'.repeat(670);
 const ANCHOR_TEXT = 'compact this very long turn but keep my exact words';
+const BIG_ACTIVE_TOOL_SCHEMA_CHARS = 12_000;
 
 interface MidTurnFixture {
   backend: AiSdkBackend;
@@ -160,6 +161,16 @@ interface MidTurnFixtureOptions {
   priorRunHeaders?: readonly AgentRunHeader[];
   /** System prompt size sent through the provider's separate system field. */
   systemPromptChars?: number;
+  /** Lower the pre-turn history-shaping threshold so that gate can be exercised. */
+  maxHistoryEstimatedTokens?: number;
+  /** An always-active tool whose schema dominates the request payload. */
+  bigActiveTool?: boolean;
+  /**
+   * Run as a child agent with a two-step budget, so the turn's LAST request is
+   * the child-summary finalization step: it adds a prompt fragment and sends no
+   * tool schemas at all.
+   */
+  childFinalization?: boolean;
   /** Enable and capture automatic Memory extraction without allowing it to settle. */
   captureMemoryExtraction?: boolean;
   memoryGate?:
@@ -423,7 +434,10 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
 
   const backend = createTestAiSdkBackend({
     sessionId: 'session-1',
-    header: header(),
+    header: options.childFinalization
+      ? { ...header(), collaborationMode: 'agent' as const }
+      : header(),
+    ...(options.childFinalization ? { maxSteps: 2 } : {}),
     appendMessage: async (message) => {
       messages.push(message);
     },
@@ -461,6 +475,16 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
           return { body: RAW_SPAN_TWO };
         },
       },
+      ...(options.bigActiveTool
+        ? [
+            {
+              name: 'BigActive',
+              description: `BIG_ACTIVE_SCHEMA ${'A'.repeat(BIG_ACTIVE_TOOL_SCHEMA_CHARS)}`,
+              parameters: z.object({ q: z.string() }),
+              impl: async () => ({ ok: true }),
+            },
+          ]
+        : []),
       ...(options.bigToolGroup
         ? [
             {
@@ -493,7 +517,7 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
         )
       : {
           name: 'mid-turn-test',
-          maxHistoryEstimatedTokens: 100_000,
+          maxHistoryEstimatedTokens: options.maxHistoryEstimatedTokens ?? 100_000,
           historyCompact: {
             enabled: true,
             midTurn: { enabled: true, reserveTokens },
@@ -1605,6 +1629,94 @@ describe('the shipped runtime default drives the proactive long-turn journey (is
     assert.equal(promptJson(fixture, 0).includes('PRIOR_FACT'), true);
   });
 
+  test('the anchored step-0 estimate is the turn-start trigger; the pre-turn gate stands down', async () => {
+    // Both triggers are armed: the pre-turn history gate is over its threshold
+    // (the sibling test below proves it fires there), and the anchor says the
+    // first request really costs 30k against a 20k high water. Only ONE may act, and it is
+    // the anchored estimate — the gate weighs a subset of the payload with a
+    // cruder ruler, so it is a fallback, not a parallel authority.
+    const previous = buildFixture({
+      priorChars: 2_000,
+      contextWindow: 1_000_000,
+      finalAtSecondCall: true,
+      finalStepUsage: { input: 30_000, output: 10 },
+    });
+    await runFixtureTurn(previous);
+
+    const seeded = buildFixture({
+      priorChars: 2_000,
+      contextWindow: 40_000,
+      reserveTokens: 20_000,
+      maxHistoryEstimatedTokens: 400,
+      finalAtSecondCall: true,
+      extraPriorEvents: priorTurnUsageEvents(previous),
+      priorRunHeaders: [priorRunHeader()],
+    });
+    await runFixtureTurn(seeded);
+
+    const decisions = compactionDecisions(seeded);
+    assert.equal(
+      decisions.some((decision) => decision.stage === 'priorReplay'),
+      false,
+    );
+    assert.equal(
+      decisions.some(
+        (decision) => decision.stage === 'activeStep' && decision.decision === 'replaced',
+      ),
+      true,
+    );
+  });
+
+  test('without an anchor the pre-turn gate still shapes an oversized history', async () => {
+    // No anchor and no seam-side estimate to replace it: the fallback gate is
+    // the only thing standing between an oversized history and the provider.
+    const fixture = buildFixture({
+      priorChars: 2_000,
+      contextWindow: 40_000,
+      reserveTokens: 20_000,
+      maxHistoryEstimatedTokens: 400,
+      finalAtSecondCall: true,
+    });
+    await runFixtureTurn(fixture);
+
+    assert.equal(
+      compactionDecisions(fixture).some((decision) => decision.stage === 'priorReplay'),
+      true,
+    );
+  });
+
+  test('the anchor a finalization step writes excludes the tool schemas it cleared', async () => {
+    // The child-summary finalization step sends no tools at all. Measuring the
+    // pre-dispatch tool set would pair the provider's real input count with a
+    // payload 12k chars larger than the request it counted.
+    const finalization = buildFixture({
+      contextWindow: 1_000_000,
+      finalAtSecondCall: true,
+      bigActiveTool: true,
+      childFinalization: true,
+    });
+    await runFixtureTurn(finalization);
+    const control = buildFixture({
+      contextWindow: 1_000_000,
+      finalAtSecondCall: true,
+      bigActiveTool: true,
+    });
+    await runFixtureTurn(control);
+
+    assert.equal(
+      promptJson(finalization, 1).includes('BIG_ACTIVE_SCHEMA'),
+      false,
+      'the finalization request itself carries no tool schema',
+    );
+    assert.equal(anchorOf(control) !== undefined, true);
+    assert.equal(
+      (anchorOf(control)?.payloadChars ?? 0) > BIG_ACTIVE_TOOL_SCHEMA_CHARS,
+      true,
+      'an ordinary last request does carry the schema',
+    );
+    assert.equal((anchorOf(finalization)?.payloadChars ?? 0) < BIG_ACTIVE_TOOL_SCHEMA_CHARS, true);
+  });
+
   test('an anchor from another model is discarded rather than converted', async () => {
     // Input tokens are a count in one model's tokenizer; nothing converts them.
     const fixture = buildFixture({
@@ -1688,6 +1800,17 @@ describe('the shipped runtime default drives the proactive long-turn journey (is
  * so the next fixture turn sees them the way `prior-run-context` serves them
  * back after a restart.
  */
+/** The `lastRequestAnchor` the fixture's turn persisted on its usage message. */
+function anchorOf(
+  fixture: MidTurnFixture,
+): { inputTokens: number; payloadChars: number } | undefined {
+  const usage = fixture.messages.find(
+    (message): message is { type: 'token_usage'; lastRequestAnchor?: unknown } =>
+      (message as { type?: string }).type === 'token_usage',
+  );
+  return usage?.lastRequestAnchor as { inputTokens: number; payloadChars: number } | undefined;
+}
+
 function priorTurnUsageEvents(fixture: MidTurnFixture): RuntimeEvent[] {
   return fixture.ledger
     .filter((event) => event.actions?.tokenUsage !== undefined)

@@ -100,7 +100,7 @@ export function serializedToolResultProjection(projection: DurableToolResultProj
  * artifact serializes to a short reference and materializes to real image
  * bytes, so measuring the string alone would price a screenshot at nothing.
  */
-export function toolResultProjectionEstimatedTokens(
+function toolResultProjectionEstimatedTokens(
   projection: DurableToolResultProjection,
   serialized: string,
   charsPerToken: number,
