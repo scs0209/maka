@@ -116,7 +116,7 @@ import {
   resolveContextBudgetCapacity,
   type ContextBudgetCapacity,
 } from './context-budget-policy.js';
-import { MATERIALIZED_IMAGE_TOKENS } from './durable-tool-result-projection.js';
+import { MAX_MATERIALIZED_IMAGE_TOKENS } from '@maka/core/attachments';
 import {
   collectHistoricalImageToolResults,
   type HistoricalImageToolResult,
@@ -1823,10 +1823,15 @@ function midTurnRequestPayloadChars(
  *
  * Materialization turns an artifact reference into real bytes, and those bytes
  * reach the request as base64 text or as a byte map — a 500 KB screenshot
- * serializes to ~667K chars and bills ~1.5K tokens. Measuring the string makes
- * one image look like a whole context window, which is how an affordable
- * request became a terminal verdict (#4458). Substituting the same constant
- * the ledger's ruler uses keeps the two measures commensurable.
+ * serializes to ~667K chars and bills a few thousand tokens. Measuring the
+ * string makes one image look like a whole context window, which is how an
+ * affordable request became a terminal verdict (#4458).
+ *
+ * A materialized part no longer carries the dimensions the ledger kept, so this
+ * bills every image at the admission bound. That is the safe direction for a
+ * measure the capacity verdict reads — it cannot bill an image below what the
+ * provider will charge — at the cost of over-billing a small one. Closing that
+ * gap needs the dimensions to survive materialization.
  */
 function requestMessagesChars(messages: readonly ModelMessage[], charsPerToken: number): number {
   let mediaParts = 0;
@@ -1836,7 +1841,8 @@ function requestMessagesChars(messages: readonly ModelMessage[], charsPerToken: 
     return { type: value.type, mediaType: value.mediaType };
   });
   return (
-    (serialized?.length ?? 0) + mediaParts * MATERIALIZED_IMAGE_TOKENS * Math.max(1, charsPerToken)
+    (serialized?.length ?? 0) +
+    mediaParts * MAX_MATERIALIZED_IMAGE_TOKENS * Math.max(1, charsPerToken)
   );
 }
 

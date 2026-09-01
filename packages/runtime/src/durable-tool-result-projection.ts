@@ -29,7 +29,11 @@ import {
   type DurableToolResultProjection,
   type DurableToolResultProjectionPart,
 } from '@maka/core/durable-tool-result-projection';
-import { MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
+import {
+  isAdmittedImageEdge,
+  MAX_READ_IMAGE_BYTES,
+  materializedImageTokens,
+} from '@maka/core/attachments';
 import {
   isCanonicalArtifactEntityId,
   normalizeArtifactImagePreviewMime,
@@ -44,6 +48,7 @@ import { decodePersistedToolResultContent } from '@maka/core/tool-result-record-
 import type { ToolResultOutput } from './model-protocol.js';
 import { toolResultOutput } from './tool-result-output.js';
 import { withToolResultArchiveResourceRef } from './tool-result-archive.js';
+import { imageDimensions } from './image-file.js';
 import { projectBashToolResultForModel } from './bash-model-output.js';
 import { projectFileWriteToolResultForModel } from './file-tool-model-output.js';
 
@@ -123,7 +128,7 @@ export function encodeDefaultDurableToolResultOutput(
       return decodeDurableToolResultProjection({
         version: DURABLE_TOOL_RESULT_PROJECTION_VERSION,
         kind: 'content',
-        parts: [{ kind: 'artifact', mediaType, ref: image.ref }],
+        parts: [{ kind: 'artifact', mediaType, ref: image.ref, ...(image.dimensions ?? {}) }],
       });
     } catch {
       return DURABLE_TOOL_RESULT_PROJECTION_FAILURE;
@@ -173,22 +178,13 @@ export function durableProjectionToToolResultOutput(
   }
 }
 
-/**
- * What one image costs the request once materialization rehydrates it.
- *
- * A flat per-modality constant, because no character count answers this: both
- * an artifact part and a legacy image result reduce to a one-line reference,
- * and providers price an image by its resized tile area. Independent of the
- * selected model — sizing may not read the model, and over-counting only
- * triggers compaction.
- */
-export const MATERIALIZED_IMAGE_TOKENS = 2_000;
-
 /** One image a Tool Result puts in the request. */
 export interface MaterializedToolResultMedia {
   mediaType: string;
   /** How the model is told to name it once it is gone. */
   label: string;
+  /** Absent when the encoder held only a reference; sizing then uses the bound. */
+  dimensions?: { width: number; height: number };
 }
 
 function projectionArtifactMedia(
@@ -201,6 +197,9 @@ function projectionArtifactMedia(
           {
             mediaType: part.mediaType,
             label: part.ref.kind === 'session_context' ? part.ref.refId : part.ref.relativePath,
+            ...(part.width !== undefined && part.height !== undefined
+              ? { dimensions: { width: part.width, height: part.height } }
+              : {}),
           },
         ]
       : [],
@@ -224,13 +223,18 @@ export function effectiveToolResultMedia(
     {
       mediaType: image.mimeType,
       label: image.ref.kind === 'session_context' ? image.ref.refId : image.ref.relativePath,
+      ...(image.dimensions ? { dimensions: image.dimensions } : {}),
     },
   ];
 }
 
+function mediaTokens(media: readonly MaterializedToolResultMedia[]): number {
+  return media.reduce((total, image) => total + materializedImageTokens(image.dimensions), 0);
+}
+
 /** Tokens the artifact parts of one projection cost once materialized. */
 export function estimateProjectionMediaTokens(projection: DurableToolResultProjection): number {
-  return projectionArtifactMedia(projection).length * MATERIALIZED_IMAGE_TOKENS;
+  return mediaTokens(projectionArtifactMedia(projection));
 }
 
 /** Tokens the images of one decoded Tool Result cost once materialized. */
@@ -238,7 +242,7 @@ export function estimateEffectiveMediaTokens(
   effective: EffectiveToolResultProjection,
   sessionId: string,
 ): number {
-  return effectiveToolResultMedia(effective, sessionId).length * MATERIALIZED_IMAGE_TOKENS;
+  return mediaTokens(effectiveToolResultMedia(effective, sessionId));
 }
 
 /**
@@ -428,12 +432,15 @@ function prepareContentProjection(
     ) {
       const mediaType = normalizeArtifactImagePreviewMime(part.mediaType);
       if (!mediaType) throw new Error('Inline image has an unsafe media type');
-      const artifact = planArtifact({
-        bytes: decodeBoundedImageData(part.data.data),
-        mediaType,
-      });
+      const bytes = decodeBoundedImageData(part.data.data);
+      const artifact = planArtifact({ bytes, mediaType });
       artifacts.push(artifact);
-      parts.push({ kind: 'artifact', mediaType, ref: artifact.ref });
+      parts.push({
+        kind: 'artifact',
+        mediaType,
+        ref: artifact.ref,
+        ...(imageDimensions(bytes) ?? {}),
+      });
       continue;
     }
     parts.push({ kind: 'text', text: OMITTED_BINARY_TEXT });
@@ -504,15 +511,28 @@ function decodeBoundedImageData(data: unknown): Uint8Array {
 
 function sessionImageResult(result: unknown, sessionId: string) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined;
-  const image = result as { kind?: unknown; mimeType?: unknown; ref?: unknown };
-  return image.kind === 'image' &&
-    typeof image.mimeType === 'string' &&
-    image.mimeType.length > 0 &&
-    isCanonicalStorageRef(image.ref) &&
-    (image.ref.kind === 'session_context' || image.ref.kind === 'session_file') &&
-    image.ref.sessionId === sessionId
-    ? { mimeType: image.mimeType, ref: image.ref }
-    : undefined;
+  const image = result as {
+    kind?: unknown;
+    mimeType?: unknown;
+    ref?: unknown;
+    width?: unknown;
+    height?: unknown;
+  };
+  if (
+    image.kind !== 'image' ||
+    typeof image.mimeType !== 'string' ||
+    image.mimeType.length === 0 ||
+    !isCanonicalStorageRef(image.ref) ||
+    (image.ref.kind !== 'session_context' && image.ref.kind !== 'session_file') ||
+    image.ref.sessionId !== sessionId
+  ) {
+    return undefined;
+  }
+  const dimensions =
+    typeof image.width === 'number' && typeof image.height === 'number'
+      ? { width: image.width, height: image.height }
+      : undefined;
+  return { mimeType: image.mimeType, ref: image.ref, ...(dimensions ? { dimensions } : {}) };
 }
 
 function isLegacyPathImageResult(result: unknown, sessionId: string): boolean {

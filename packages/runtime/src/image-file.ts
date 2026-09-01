@@ -48,9 +48,24 @@ export async function readWorkspaceImage(
   return validateImageBytes(bytes);
 }
 
+/** Pixel dimensions read from an image's header, or nothing when unreadable. */
+export function imageDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  const dimensions = imageDimensionsFromData(bytes);
+  return dimensions &&
+    Number.isSafeInteger(dimensions.width) &&
+    Number.isSafeInteger(dimensions.height) &&
+    dimensions.width > 0 &&
+    dimensions.height > 0 &&
+    Math.max(dimensions.width, dimensions.height) <= MAX_MODEL_IMAGE_EDGE
+    ? { width: dimensions.width, height: dimensions.height }
+    : undefined;
+}
+
 export function validateImageBytes(bytes: Uint8Array): {
   bytes: Uint8Array;
   mimeType: ImageMimeType;
+  width: number;
+  height: number;
 } {
   if (bytes.length > MAX_READ_IMAGE_BYTES) throw imageTooLargeError();
   const mimeType = sniffImageMime(bytes);
@@ -72,7 +87,7 @@ export function validateImageBytes(bytes: Uint8Array): {
       `Image dimensions ${dimensions.width}x${dimensions.height} exceed the ${MAX_MODEL_IMAGE_EDGE}px model input limit; downscale it and try again.`,
     );
   }
-  return { bytes, mimeType };
+  return { bytes, mimeType, width: dimensions.width, height: dimensions.height };
 }
 
 function imageTooLargeError(): Error {

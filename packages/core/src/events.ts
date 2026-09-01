@@ -854,7 +854,7 @@ export type ToolResultContent =
       sandboxDenial?: SandboxDenialSignal | SandboxDenialRecovery;
     }
   | ShellRunToolResultContent
-  | { kind: 'image'; mimeType: string; ref: StorageRef }
+  | { kind: 'image'; mimeType: string; ref: StorageRef; width?: number; height?: number }
   | { kind: 'summary'; original: string; summarized: string; reason: 'too_large' }
   /**
    * PR-CHAT-WEB-SEARCH-RENDER-0: structured tool-result for the gated

@@ -22,6 +22,7 @@ import { describe, test } from 'node:test';
 
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { StorageRef } from '@maka/core/events';
+import { MAX_MATERIALIZED_IMAGE_TOKENS } from '@maka/core/attachments';
 import type { ModelMessage } from '../model-protocol.js';
 import {
   collectHistoricalImageToolResults,
@@ -40,7 +41,11 @@ function legacyImageResultEvent(toolCallId: string, relativePath: string): Runti
   return event;
 }
 
-function imageResultEvent(toolCallId: string, ref: StorageRef): RuntimeEvent {
+function imageResultEvent(
+  toolCallId: string,
+  ref: StorageRef,
+  dimensions: { width: number; height: number } = { width: 1500, height: 1000 },
+): RuntimeEvent {
   return {
     id: `event-${toolCallId}`,
     sessionId: 'session-1',
@@ -66,7 +71,7 @@ function imageResultEvent(toolCallId: string, ref: StorageRef): RuntimeEvent {
         kind: 'content',
         parts: [
           { kind: 'text', text: 'Image read successfully.' },
-          { kind: 'artifact', mediaType: 'image/png', ref },
+          { kind: 'artifact', mediaType: 'image/png', ref, ...dimensions },
         ],
       },
       isError: false,
@@ -172,7 +177,7 @@ describe('provider image overflow recovery projection', () => {
     assert.match(prompt(result.messages), /read-image:owner-1/);
   });
 
-  test('prices an image artifact by its materialized cost, not its reference text', () => {
+  test('prices an image artifact by its pixel area, not by its reference text', () => {
     const eligible = collectHistoricalImageToolResults([
       imageResultEvent('prior-image-call', {
         kind: 'session_file',
@@ -181,7 +186,27 @@ describe('provider image overflow recovery projection', () => {
       }),
     ]);
 
+    // 1500 x 1000 px at the reference rate of one token per 750 px.
     assert.equal(eligible.get('prior-image-call')?.estimatedTokens, 2000);
+  });
+
+  test('falls back to the admission bound when an artifact records no dimensions', () => {
+    const event = imageResultEvent('prior-image-call', {
+      kind: 'session_file',
+      sessionId: 'session-1',
+      relativePath: 'artifact-screenshot-1',
+    });
+    const parts = (event.content as { modelProjection: { parts: Record<string, unknown>[] } })
+      .modelProjection.parts;
+    for (const part of parts) {
+      delete part.width;
+      delete part.height;
+    }
+
+    assert.equal(
+      collectHistoricalImageToolResults([event]).get('prior-image-call')?.estimatedTokens,
+      MAX_MATERIALIZED_IMAGE_TOKENS,
+    );
   });
 
   test('still recovers a pre-artifact image result that has no durable projection', () => {
@@ -193,32 +218,29 @@ describe('provider image overflow recovery projection', () => {
       eligible,
     );
 
-    assert.equal(eligible.get('prior-image-call')?.estimatedTokens, 2000);
+    assert.equal(eligible.get('prior-image-call')?.estimatedTokens, MAX_MATERIALIZED_IMAGE_TOKENS);
     assert.equal(result.omittedParts, 1);
     assert.match(prompt(result.messages), /screenshots\/screenshot\.png/);
   });
 
   test('drops the largest images only until the overshoot is covered', () => {
+    const artifact = (relativePath: string): StorageRef => ({
+      kind: 'session_file',
+      sessionId: 'session-1',
+      relativePath,
+    });
+    // 300, 1200 and 4800 tokens respectively.
     const eligible = collectHistoricalImageToolResults([
-      imageResultEvent('call-a', {
-        kind: 'session_file',
-        sessionId: 'session-1',
-        relativePath: 'artifact-a',
-      }),
-      imageResultEvent('call-b', {
-        kind: 'session_file',
-        sessionId: 'session-1',
-        relativePath: 'artifact-b',
-      }),
-      imageResultEvent('call-c', {
-        kind: 'session_file',
-        sessionId: 'session-1',
-        relativePath: 'artifact-c',
-      }),
+      imageResultEvent('small', artifact('artifact-a'), { width: 450, height: 500 }),
+      imageResultEvent('medium', artifact('artifact-b'), { width: 900, height: 1000 }),
+      imageResultEvent('large', artifact('artifact-c'), { width: 1800, height: 2000 }),
     ]);
 
-    assert.equal(selectHistoricalImageOmissions(eligible, 1).size, 1);
-    assert.equal(selectHistoricalImageOmissions(eligible, 2500).size, 2);
+    assert.deepEqual([...selectHistoricalImageOmissions(eligible, 1).keys()], ['large']);
+    assert.deepEqual(
+      [...selectHistoricalImageOmissions(eligible, 5_000).keys()],
+      ['large', 'medium'],
+    );
     assert.equal(selectHistoricalImageOmissions(eligible, 99_000).size, 3);
     assert.equal(selectHistoricalImageOmissions(eligible, undefined).size, 3);
   });

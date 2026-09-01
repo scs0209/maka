@@ -73,6 +73,51 @@ export const MAX_READ_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_MODEL_IMAGE_EDGE = 2000;
 export const READ_IMAGE_TOO_LARGE_MESSAGE = `Image exceeds the ${MAX_READ_IMAGE_BYTES / 1024 / 1024}MB model input limit; downscale it and try again.`;
 
+/**
+ * Pixels a provider charges one input token for.
+ *
+ * Providers price an image by the area they resize it to, not by the bytes on
+ * the wire. This is the costliest published rate among the models this runtime
+ * targets (Anthropic bills `width * height / 750`; the tile schemes elsewhere
+ * come out cheaper at the same area), so sizing that uses it cannot bill an
+ * image below what the request will actually be charged.
+ */
+export const PIXELS_PER_IMAGE_TOKEN = 750;
+
+/**
+ * What the largest image this runtime will admit can cost.
+ *
+ * Sizing falls back to this when an image's dimensions are unknown. It is a
+ * bound rather than an average on purpose: an image that costs more than it was
+ * budgeted overflows the request, while one that costs less only buys an
+ * unnecessary compaction.
+ */
+export const MAX_MATERIALIZED_IMAGE_TOKENS = Math.ceil(
+  (MAX_MODEL_IMAGE_EDGE * MAX_MODEL_IMAGE_EDGE) / PIXELS_PER_IMAGE_TOKEN,
+);
+
+/** One edge of an image this runtime would admit, or nothing recorded at all. */
+export function isAdmittedImageEdge(value: unknown): value is number | undefined {
+  return (
+    value === undefined ||
+    (typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value > 0 &&
+      value <= MAX_MODEL_IMAGE_EDGE)
+  );
+}
+
+/** Tokens one admitted image costs the request, from its pixel dimensions. */
+export function materializedImageTokens(
+  dimensions: { width: number; height: number } | undefined,
+): number {
+  if (!dimensions) return MAX_MATERIALIZED_IMAGE_TOKENS;
+  return Math.min(
+    MAX_MATERIALIZED_IMAGE_TOKENS,
+    Math.max(1, Math.ceil((dimensions.width * dimensions.height) / PIXELS_PER_IMAGE_TOKEN)),
+  );
+}
+
 /** Leaves room for Base64 expansion, text, and tool schemas under provider request limits. */
 export const MAX_PROVIDER_IMAGE_REQUEST_BYTES = 12 * 1024 * 1024;
 export const PROVIDER_IMAGE_BUDGET_EXCEEDED_MESSAGE = `Image was read, but the per-request image budget (${MAX_PROVIDER_IMAGE_REQUEST_BYTES / 1024 / 1024}MB across all images this turn) was exceeded; earlier images were sent and this one was omitted. Read fewer or smaller images.`;

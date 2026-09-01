@@ -41,6 +41,7 @@ import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import { type SandboxBoundaryExpansion } from '@maka/core/sandbox-boundary';
 import { type StorageRef, type ToolResultContent } from '@maka/core/events';
 import { type PermissionProfile } from '@maka/core/permission-profile';
+import { imageDimensions } from './image-file.js';
 import { bashToolResultToModelOutput } from './bash-model-output.js';
 import { fileWriteToolResultToModelOutput } from './file-tool-model-output.js';
 import { openAiApplyPatchInputSchema } from './openai-apply-patch.js';
@@ -405,7 +406,16 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
             bytes: result.bytes,
             mimeType: result.mimeType,
           });
-          return { kind: 'image' as const, mimeType: result.mimeType, ref };
+          // Dimensions travel with the result so context sizing can price the
+          // image by the area a provider charges for, not by the length of the
+          // reference that replaces it on the ledger.
+          const dimensions = imageDimensions(result.bytes);
+          return {
+            kind: 'image' as const,
+            mimeType: result.mimeType,
+            ref,
+            ...(dimensions ?? {}),
+          };
         }
         if (result.kind !== 'read')
           throw internalFilesystemReadFailure(

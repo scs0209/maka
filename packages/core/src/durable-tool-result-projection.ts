@@ -19,6 +19,7 @@
 
 import { isCanonicalStorageRef, type StorageRef } from './events.js';
 import { isCanonicalArtifactEntityId, normalizeArtifactImagePreviewMime } from './artifacts.js';
+import { isAdmittedImageEdge } from './attachments.js';
 import { hasExactShape, isRecord } from './record-schema.js';
 import { serializedByteLength } from './serialized-byte-length.js';
 
@@ -49,6 +50,14 @@ export type DurableToolResultProjectionPart =
       kind: 'artifact';
       mediaType: string;
       ref: DurableProjectionArtifactRef;
+      /**
+       * Pixel dimensions, when the encoder held the bytes. Present so sizing can
+       * price the image by what a provider charges for it — an area, not the
+       * length of this reference. Absent on an artifact encoded from a ref
+       * alone, where sizing must fall back to the admission bound.
+       */
+      width?: number;
+      height?: number;
     };
 
 export type DurableToolResultProjection =
@@ -149,8 +158,12 @@ function isProjectionPart(value: unknown): value is DurableToolResultProjectionP
     value.kind === 'artifact' &&
     hasExactShape(value, {
       required: ['kind', 'mediaType', 'ref'],
-      allowed: new Set(['kind', 'mediaType', 'ref']),
+      allowed: new Set(['kind', 'mediaType', 'ref', 'width', 'height']),
     }) &&
+    isAdmittedImageEdge(value.width) &&
+    isAdmittedImageEdge(value.height) &&
+    // One edge alone yields no area, so it would claim knowledge sizing cannot use.
+    (value.width === undefined) === (value.height === undefined) &&
     typeof value.mediaType === 'string' &&
     normalizeArtifactImagePreviewMime(value.mediaType) === value.mediaType &&
     isCanonicalStorageRef(value.ref) &&

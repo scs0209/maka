@@ -28,6 +28,7 @@ import {
   encodeDefaultDurableToolResultOutput,
   encodeDurableToolResultOutput,
   encodeDurableToolResultOutputWithArtifacts,
+  estimateProjectionMediaTokens,
 } from '../durable-tool-result-projection.js';
 
 describe('durable Tool Result projection codec', () => {
@@ -122,6 +123,40 @@ describe('durable Tool Result projection codec', () => {
     );
 
     assert.equal(projection.kind, 'failure');
+  });
+
+  it('records an inline image\u2019s dimensions so sizing can price its area', async () => {
+    // A 3x2 PNG: IHDR width and height at bytes 16 and 20.
+    const png = Buffer.alloc(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.write('IHDR', 12, 'ascii');
+    png.writeUInt32BE(3, 16);
+    png.writeUInt32BE(2, 20);
+    const projection = await encodeDurableToolResultOutputWithArtifacts(
+      {
+        type: 'content',
+        value: [
+          {
+            type: 'file',
+            data: { type: 'data', data: png.toString('base64') },
+            mediaType: 'image/png',
+          },
+        ],
+      },
+      'session-1',
+      artifactPlanner(() => {}),
+    );
+
+    assert.equal(projection.kind, 'content');
+    if (projection.kind !== 'content') return;
+    assert.deepEqual(
+      projection.parts.map((part) =>
+        part.kind === 'artifact' ? { width: part.width, height: part.height } : part.kind,
+      ),
+      [{ width: 3, height: 2 }],
+    );
+    // Below one token of area, so the floor applies rather than the bound.
+    assert.equal(estimateProjectionMediaTokens(projection), 1);
   });
 
   it('validates every inline image before persisting any projection artifact', async () => {

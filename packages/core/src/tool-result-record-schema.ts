@@ -24,6 +24,7 @@ import {
 import { decodePersistedPermissionMode, isPermissionMode } from './permission.js';
 import type { PersistedValue } from './persisted-value.js';
 import { isStorageRef, type ToolResultContent } from './events.js';
+import { isAdmittedImageEdge } from './attachments.js';
 import { validateSandboxBoundaryExpansion } from './sandbox-boundary.js';
 import {
   defineObjectShape,
@@ -67,7 +68,10 @@ const ARCHIVED_SHAPE = defineObjectShape<Result<'archived_tool_result'>>()(
   ],
   ['artifactId', 'bodySha256'],
 );
-const IMAGE_SHAPE = defineObjectShape<Result<'image'>>()(['kind', 'mimeType', 'ref'], []);
+const IMAGE_SHAPE = defineObjectShape<Result<'image'>>()(
+  ['kind', 'mimeType', 'ref'],
+  ['width', 'height'],
+);
 const SUMMARY_SHAPE = defineObjectShape<Result<'summary'>>()(
   ['kind', 'original', 'summarized', 'reason'],
   [],
@@ -253,7 +257,9 @@ function isNonShellToolResultContent(value: unknown): value is ToolResultContent
       return (
         hasExactShape(value, IMAGE_SHAPE) &&
         typeof value.mimeType === 'string' &&
-        isStorageRef(value.ref)
+        isStorageRef(value.ref) &&
+        isAdmittedImageEdge(value.width) &&
+        isAdmittedImageEdge(value.height)
       );
     case 'summary':
       return (

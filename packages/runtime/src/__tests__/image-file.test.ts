@@ -40,6 +40,8 @@ test('validateImageBytes accepts a valid one-pixel image', () => {
   assert.deepEqual(validateImageBytes(ONE_PIXEL_PNG), {
     bytes: ONE_PIXEL_PNG,
     mimeType: 'image/png',
+    width: 1,
+    height: 1,
   });
 });
 
