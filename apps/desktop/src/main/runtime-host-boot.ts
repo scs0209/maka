@@ -1597,7 +1597,11 @@ function registerPersistentClientIpc(): void {
   });
   registerMarkdownSaveIpc({ ipcMain, mainWindowController });
   registerDesktopRuntimeHostProfileIpc(ipcMain, runtimeHostProfileService);
-  registerDesktopGuestSessionMountIpc(ipcMain, guestSessionMountService);
+  registerDesktopGuestSessionMountIpc(
+    ipcMain,
+    guestSessionMountService,
+    () => clipboard.readText(),
+  );
   registerClientSettingsIpc({
     ipcMain,
     settingsStore,
