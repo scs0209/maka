@@ -77,20 +77,22 @@ export const READ_IMAGE_TOO_LARGE_MESSAGE = `Image exceeds the ${MAX_READ_IMAGE_
  * Pixels a provider charges one input token for.
  *
  * Providers price an image by the area they resize it to, not by the bytes on
- * the wire. This is the costliest published rate among the models this runtime
- * targets (Anthropic bills `width * height / 750`; the tile schemes elsewhere
- * come out cheaper at the same area), so sizing that uses it cannot bill an
- * image below what the request will actually be charged.
+ * the wire. This bounds the per-pixel rate of the schemes this runtime targets
+ * (Anthropic bills `width * height / 750`; the tile schemes elsewhere come out
+ * cheaper at the same area). It does not bound a per-image floor: Gemini
+ * charges 258 tokens for any image under 384px on both sides, so a small image
+ * bills under what it costs. Sizing may only trigger compaction, never a
+ * verdict, so under-billing costs a round trip the provider recovers.
  */
 export const PIXELS_PER_IMAGE_TOKEN = 750;
 
 /**
  * What the largest image this runtime will admit can cost.
  *
- * Sizing falls back to this when an image's dimensions are unknown. It is a
- * bound rather than an average on purpose: an image that costs more than it was
- * budgeted overflows the request, while one that costs less only buys an
- * unnecessary compaction.
+ * Sizing falls back to this when an image's dimensions are unknown. Both
+ * directions are recoverable — every consumer of this number only ever buys a
+ * compaction — so it is a bound rather than an average to keep the fallback on
+ * the side that compacts too early rather than too late.
  */
 export const MAX_MATERIALIZED_IMAGE_TOKENS = Math.ceil(
   (MAX_MODEL_IMAGE_EDGE * MAX_MODEL_IMAGE_EDGE) / PIXELS_PER_IMAGE_TOKEN,

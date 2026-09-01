@@ -64,8 +64,6 @@ export function imageDimensions(bytes: Uint8Array): { width: number; height: num
 export function validateImageBytes(bytes: Uint8Array): {
   bytes: Uint8Array;
   mimeType: ImageMimeType;
-  width: number;
-  height: number;
 } {
   if (bytes.length > MAX_READ_IMAGE_BYTES) throw imageTooLargeError();
   const mimeType = sniffImageMime(bytes);
@@ -87,7 +85,7 @@ export function validateImageBytes(bytes: Uint8Array): {
       `Image dimensions ${dimensions.width}x${dimensions.height} exceed the ${MAX_MODEL_IMAGE_EDGE}px model input limit; downscale it and try again.`,
     );
   }
-  return { bytes, mimeType, width: dimensions.width, height: dimensions.height };
+  return { bytes, mimeType };
 }
 
 function imageTooLargeError(): Error {

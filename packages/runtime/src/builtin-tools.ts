@@ -406,9 +406,6 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
             bytes: result.bytes,
             mimeType: result.mimeType,
           });
-          // Dimensions travel with the result so context sizing can price the
-          // image by the area a provider charges for, not by the length of the
-          // reference that replaces it on the ledger.
           const dimensions = imageDimensions(result.bytes);
           return {
             kind: 'image' as const,

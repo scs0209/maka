@@ -29,11 +29,7 @@ import {
   type DurableToolResultProjection,
   type DurableToolResultProjectionPart,
 } from '@maka/core/durable-tool-result-projection';
-import {
-  isAdmittedImageEdge,
-  MAX_READ_IMAGE_BYTES,
-  materializedImageTokens,
-} from '@maka/core/attachments';
+import { MAX_READ_IMAGE_BYTES, materializedImageTokens } from '@maka/core/attachments';
 import {
   isCanonicalArtifactEntityId,
   normalizeArtifactImagePreviewMime,
@@ -180,7 +176,6 @@ export function durableProjectionToToolResultOutput(
 
 /** One image a Tool Result puts in the request. */
 export interface MaterializedToolResultMedia {
-  mediaType: string;
   /** How the model is told to name it once it is gone. */
   label: string;
   /** Absent when the encoder held only a reference; sizing then uses the bound. */
@@ -195,7 +190,6 @@ function projectionArtifactMedia(
     part.kind === 'artifact'
       ? [
           {
-            mediaType: part.mediaType,
             label: part.ref.kind === 'session_context' ? part.ref.refId : part.ref.relativePath,
             ...(part.width !== undefined && part.height !== undefined
               ? { dimensions: { width: part.width, height: part.height } }
@@ -221,7 +215,6 @@ export function effectiveToolResultMedia(
   if (!image) return [];
   return [
     {
-      mediaType: image.mimeType,
       label: image.ref.kind === 'session_context' ? image.ref.refId : image.ref.relativePath,
       ...(image.dimensions ? { dimensions: image.dimensions } : {}),
     },
