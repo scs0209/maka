@@ -43,6 +43,7 @@ import type {
 } from '../history-compact-checkpoint.js';
 import type { ContextBudgetDiagnostic } from '@maka/core/usage-stats/types';
 import { HistoryCompactSummarizerError } from '../history-compact-error.js';
+import { MAX_MATERIALIZED_IMAGE_TOKENS } from '@maka/core/attachments';
 import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
 import type { HistoryCompactSummaryInput } from '../ai-sdk-compaction-contract.js';
 import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
@@ -63,6 +64,13 @@ const ROLLING_TAIL = 'ROLLING_TAIL_'.repeat(740);
 const HUGE_RESULT = 'HUGE_RESULT_'.repeat(670);
 const ANCHOR_TEXT = 'compact this very long turn but keep my exact words';
 const BIG_ACTIVE_TOOL_SCHEMA_CHARS = 12_000;
+/** A real 1x1 PNG: a header the runtime can actually read a size out of. */
+const ONE_PIXEL_PNG = new Uint8Array(
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  ),
+);
 
 interface MidTurnFixture {
   backend: AiSdkBackend;
@@ -136,6 +144,8 @@ interface MidTurnFixtureOptions {
   priorChars?: number;
   /** Hydrated image byte length when it must be sized independently from text priors. */
   imageBytes?: number;
+  /** Hydrate a real (1x1 PNG) image instead of dimensionless filler bytes. */
+  realImageBytes?: boolean;
   priorShape?: 'text' | 'tool_heavy' | 'image_tool';
   /** Put one image attachment on the durable current-turn user anchor. */
   currentImage?: boolean;
@@ -456,7 +466,7 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
           supportsVision: true,
           readAttachmentBytes: async () => ({
             ok: true as const,
-            bytes: new Uint8Array(imageBytes),
+            bytes: options.realImageBytes ? ONE_PIXEL_PNG : new Uint8Array(imageBytes),
           }),
         }
       : {}),
@@ -1297,6 +1307,42 @@ describe('mid-turn capacity default-on safety guards (issue #882 PR 3)', () => {
     );
     assert.doesNotMatch(firstPrompt, /omitted after provider context overflow/);
     assert.equal(fixture.summarizerCalls, 0);
+  });
+
+  test('prices a materialized image on the payload by its area, not by the admission bound', async () => {
+    // The ledger already prices an image by w*h; the payload measure must use
+    // the SAME rule, or a signed delta taken across a materialization carries
+    // the difference between the two rulers. Both runs serialize identically
+    // (the measure replaces the bytes), so the anchor's payloadChars differ by
+    // exactly the media pricing.
+    // One image on the current user anchor and one in a prior tool result, so
+    // both materialization paths are priced.
+    const sized = buildFixture({
+      contextWindow: 1_000_000,
+      finalAtSecondCall: true,
+      currentImage: true,
+      priorShape: 'image_tool',
+      realImageBytes: true,
+    });
+    await runFixtureTurn(sized);
+    const unsized = buildFixture({
+      contextWindow: 1_000_000,
+      finalAtSecondCall: true,
+      currentImage: true,
+      priorShape: 'image_tool',
+    });
+    await runFixtureTurn(unsized);
+
+    const sizedChars = anchorOf(sized)?.payloadChars ?? 0;
+    const unsizedChars = anchorOf(unsized)?.payloadChars ?? 0;
+    assert.equal(sizedChars > 0, true);
+    // A 1x1 PNG bills one token; an image whose header says nothing still bills
+    // the admission bound, which is the only thing that fallback is for now.
+    assert.equal(
+      unsizedChars - sizedChars,
+      2 * (MAX_MATERIALIZED_IMAGE_TOKENS - 1) * 4,
+      'the unsized image costs the admission bound and the 1x1 costs one token',
+    );
   });
 
   test('keeps the fallback capacity guard inert below its unknown-model bound', async () => {

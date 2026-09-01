@@ -301,6 +301,19 @@ export interface TokenUsageFields {
 /** Real input tokens of one provider request, paired with its measured payload chars. */
 export interface LastRequestAnchor {
   inputTokens: number;
+  /**
+   * The request's size in CHAR EQUIVALENTS, so one unit covers the whole
+   * payload: the dispatched system prompt's chars, the serialized messages'
+   * chars, the serialized active tool schemas' chars, and each materialized
+   * image's billed tokens converted at the policy's chars/token.
+   *
+   * This number only means anything paired with `inputTokens` AND measured by
+   * the same rule. A release that changes how the payload is measured — how
+   * media is priced, what the measure covers — pairs old baselines with new
+   * payloads for one turn per session. That is self-healing (the next turn
+   * writes a fresh pair, and the estimator's own pairing alarm drops a wildly
+   * divergent one), but it is why nothing outside that estimate may read this.
+   */
   payloadChars: number;
 }
 

@@ -61,6 +61,32 @@ export function imageDimensions(bytes: Uint8Array): { width: number; height: num
     : undefined;
 }
 
+const materializedImageSizes = new WeakMap<object, { width: number; height: number }>();
+
+/**
+ * Remember what a materialized image will bill, at the one place that still has
+ * its bytes. A materialized `file` part reaches the provider as base64 and
+ * carries no dimensions of its own, so a payload measure that reads only the
+ * part must otherwise price every image at the admission bound — a second ruler
+ * disagreeing with the ledger's area-based one.
+ */
+export function rememberMaterializedImageSize(
+  part: object,
+  bytes: Uint8Array,
+  recorded?: { width?: number; height?: number },
+): void {
+  const size =
+    recorded?.width !== undefined && recorded.height !== undefined
+      ? { width: recorded.width, height: recorded.height }
+      : imageDimensions(bytes);
+  if (size) materializedImageSizes.set(part, size);
+}
+
+/** The remembered size of a materialized image part, absent when never seen. */
+export function materializedImageSize(part: object): { width: number; height: number } | undefined {
+  return materializedImageSizes.get(part);
+}
+
 export function validateImageBytes(bytes: Uint8Array): {
   bytes: Uint8Array;
   mimeType: ImageMimeType;

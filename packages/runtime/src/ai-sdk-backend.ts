@@ -178,6 +178,7 @@ import {
 } from './responses-reasoning-state.js';
 import type { ActiveToolResultPruneDiagnosticPatch } from './active-tool-result-prune.js';
 import { toolResultOutput } from './tool-result-output.js';
+import { rememberMaterializedImageSize } from './image-file.js';
 import { compactionDecisionDiagnosticPatch } from './compaction-boundary.js';
 import type {
   AutomaticMemoryCompactionDecision,
@@ -4320,11 +4321,13 @@ export class AiSdkBackend implements AgentBackend {
         omittedByBudget += 1;
         continue;
       }
-      parts.push({
-        type: 'file',
-        data: { type: 'data', data: read.bytes },
+      const filePart = {
+        type: 'file' as const,
+        data: { type: 'data' as const, data: read.bytes },
         mediaType: image.mimeType,
-      });
+      };
+      rememberMaterializedImageSize(filePart, read.bytes);
+      parts.push(filePart);
     }
     if (omittedByBudget > 0) {
       parts.push({
@@ -4363,19 +4366,18 @@ export class AiSdkBackend implements AgentBackend {
     if (!this.chargeImageBudget(budget, read.bytes.length, decisionKey)) {
       return toolResultText(PROVIDER_IMAGE_BUDGET_EXCEEDED_MESSAGE);
     }
+    const filePart = {
+      type: 'file' as const,
+      data: {
+        type: 'data' as const,
+        data: Buffer.from(read.bytes).toString('base64'),
+      },
+      mediaType: output.mimeType,
+    };
+    rememberMaterializedImageSize(filePart, read.bytes);
     return {
       type: 'content',
-      value: [
-        { type: 'text', text: 'Image read successfully.' },
-        {
-          type: 'file',
-          data: {
-            type: 'data',
-            data: Buffer.from(read.bytes).toString('base64'),
-          },
-          mediaType: output.mimeType,
-        },
-      ],
+      value: [{ type: 'text', text: 'Image read successfully.' }, filePart],
     };
   }
 
@@ -4426,11 +4428,15 @@ export class AiSdkBackend implements AgentBackend {
         value.push({ type: 'text', text: PROVIDER_IMAGE_BUDGET_EXCEEDED_MESSAGE });
         continue;
       }
-      value.push({
-        type: 'file',
-        data: { type: 'data', data: Buffer.from(read.bytes).toString('base64') },
+      const filePart = {
+        type: 'file' as const,
+        data: { type: 'data' as const, data: Buffer.from(read.bytes).toString('base64') },
         mediaType: part.mediaType,
-      });
+      };
+      // The durable projection already recorded the admitted dimensions; the
+      // bytes only answer when it did not.
+      rememberMaterializedImageSize(filePart, read.bytes, part);
+      value.push(filePart);
     }
     return { type: 'content', value };
   }

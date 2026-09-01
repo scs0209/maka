@@ -114,7 +114,8 @@ import {
   planHistoryCompaction,
 } from './history-compaction.js';
 import { resolveSelectedModelContextWindow } from './context-budget-policy.js';
-import { MAX_MATERIALIZED_IMAGE_TOKENS } from '@maka/core/attachments';
+import { materializedImageTokens } from '@maka/core/attachments';
+import { materializedImageSize } from './image-file.js';
 import {
   collectHistoricalImageToolResults,
   type HistoricalImageToolResult,
@@ -1824,20 +1825,20 @@ function requestEstimateAnchor(
  * where a 500 KB screenshot serializes to ~667K chars and bills a few thousand
  * tokens.
  *
- * A materialized part no longer carries the dimensions the ledger kept, so
- * every image bills at the admission bound, over-billing a small one.
+ * Priced by the SAME area rule the durable ledger uses, from the size
+ * materialization remembered for this part. The admission bound is only the
+ * unknown-size fallback, not a second ruler: an image the ledger counts as 200
+ * tokens must not cost 5334 here, or every signed delta across a materialization
+ * carries the difference.
  */
 function requestMessagesChars(messages: readonly ModelMessage[], charsPerToken: number): number {
-  let mediaParts = 0;
+  let mediaTokens = 0;
   const serialized = JSON.stringify(messages, (_key, value) => {
     if (!isInlineImageFilePart(value)) return value;
-    mediaParts += 1;
+    mediaTokens += materializedImageTokens(materializedImageSize(value));
     return { type: value.type, mediaType: value.mediaType };
   });
-  return (
-    (serialized?.length ?? 0) +
-    mediaParts * MAX_MATERIALIZED_IMAGE_TOKENS * Math.max(1, charsPerToken)
-  );
+  return (serialized?.length ?? 0) + mediaTokens * Math.max(1, charsPerToken);
 }
 
 /**
