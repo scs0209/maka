@@ -2040,6 +2040,42 @@ describe('Maka Pi TUI runner', () => {
     await run;
   });
 
+  test('restores a still-pending form draft after reconnect replay', async () => {
+    const terminal = new FakeTerminal(100, 30);
+    const driver = new FormPromptDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'ask',
+      terminal,
+    });
+
+    terminal.input('deploy');
+    terminal.input('\r');
+    await waitFor(() =>
+      plainTerminalOutput(terminal.screenOutput()).includes('Configure deployment'),
+    );
+    terminal.input('\r');
+    terminal.input('v2');
+    terminal.input('\r');
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('Version (required): v2'));
+
+    driver.publishReconnect();
+    await waitFor(() =>
+      !plainTerminalOutput(terminal.screenOutput()).includes('Configure deployment'),
+    );
+    driver.replayForm();
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('Version (required): v2'));
+
+    terminal.input('\u001b');
+    await waitFor(() => driver.responses.length === 1);
+    exitMaka(terminal);
+    await run;
+  });
+
   test('off-screen shell-run settle never clears scrollback (#1135)', async () => {
     const terminal = new FakeTerminal();
     const driver = new OffscreenSettleDriver();
@@ -8595,7 +8631,7 @@ class UserQuestionPromptDriver extends FakeSessionDriver {
 class FormPromptDriver extends FakeSessionDriver {
   readonly responses: InteractionFormResponse[] = [];
   stopCalls = 0;
-  private release: (() => void) | undefined;
+  private wake: ((action: 'replay' | 'release') => void) | undefined;
   readonly #transcriptListeners = new Set<
     (
       sessionId: string,
@@ -8609,7 +8645,7 @@ class FormPromptDriver extends FakeSessionDriver {
     return prepareTestPrompt(this, prompt);
   }
   async *promptEvents(_prompt: string): AsyncIterable<SessionEvent> {
-    yield {
+    const formRequest = {
       type: 'form_request',
       id: 'event-form',
       turnId: 'turn-1',
@@ -8622,19 +8658,24 @@ class FormPromptDriver extends FakeSessionDriver {
         { kind: 'string', name: 'version', label: 'Version', required: true, minLength: 2 },
         { kind: 'boolean', name: 'notify', label: 'Notify', required: false },
       ],
-    };
-    await new Promise<void>((resolve) => {
-      this.release = resolve;
-    });
+    } satisfies SessionEvent;
+    yield formRequest;
+    while (true) {
+      const action = await new Promise<'replay' | 'release'>((resolve) => {
+        this.wake = resolve;
+      });
+      if (action === 'release') break;
+      yield { ...formRequest, id: `event-form-replay-${Date.now()}` };
+    }
     yield { type: 'complete', id: 'complete-1', turnId: 'turn-1', ts: 2, stopReason: 'end_turn' };
   }
   async respondToUserForm(response: InteractionFormResponse): Promise<void> {
     this.responses.push(response);
-    this.release?.();
+    this.wake?.('release');
   }
   async stop(): Promise<void> {
     this.stopCalls += 1;
-    this.release?.();
+    this.wake?.('release');
   }
   subscribeTranscriptReplacements(
     listener: (
@@ -8651,6 +8692,9 @@ class FormPromptDriver extends FakeSessionDriver {
     for (const listener of this.#transcriptListeners) {
       listener('session-1', 'turn-1', [], 'reconnect');
     }
+  }
+  replayForm(): void {
+    this.wake?.('replay');
   }
 }
 
