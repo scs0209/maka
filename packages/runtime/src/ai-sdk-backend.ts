@@ -2731,6 +2731,27 @@ export class AiSdkBackend implements AgentBackend {
               }
               return undefined;
             })();
+            // The anchor the NEXT turn estimates its first request from: the
+            // last request's real input tokens paired with the runtime's own
+            // char measure of that same request. `input` below is the sum
+            // across this send's steps and anchors nothing. Both halves must
+            // describe the same request, so either one missing (no usable
+            // usage sample, or no mid-turn seam to measure the payload) drops
+            // the whole pair and the next turn cold starts.
+            const lastRequestAnchorForUsage = (() => {
+              const payloadChars = midTurnState?.lastRequestPayloadChars;
+              if (
+                lastStepInputTokens === undefined ||
+                !Number.isFinite(lastStepInputTokens) ||
+                lastStepInputTokens <= 0 ||
+                payloadChars === undefined ||
+                !Number.isFinite(payloadChars) ||
+                payloadChars <= 0
+              ) {
+                return undefined;
+              }
+              return { inputTokens: lastStepInputTokens, payloadChars };
+            })();
             // One shared usage payload for the durable message and the live
             // event: twin per-field literals drifted before (#4019), so a field
             // now has exactly one definition site.
@@ -2759,6 +2780,9 @@ export class AiSdkBackend implements AgentBackend {
                 ? { contextRemaining: contextRemainingForUsage }
                 : {}),
               ...(providerRequestTraceId ? { providerRequestTraceId } : {}),
+              ...(lastRequestAnchorForUsage
+                ? { lastRequestAnchor: lastRequestAnchorForUsage }
+                : {}),
             };
             const tu: TokenUsageMessage = {
               type: 'token_usage',

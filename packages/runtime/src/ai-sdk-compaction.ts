@@ -36,6 +36,7 @@ import type {
   BackendSendInput,
 } from '@maka/core/backend-types';
 import type { ContextBudgetDiagnostic } from '@maka/core/usage-stats/types';
+import type { LastRequestAnchor } from '@maka/core/usage-record-schema';
 
 import type {
   AiSdkCompactionCapabilities,
@@ -838,12 +839,26 @@ export class AiSdkCompaction {
     const priorContentEvents = (input.runtimeContext ?? [])
       .filter((event) => event.turnId !== input.turnId)
       .filter(isHistoryCompactContentEvent);
-    return new MidTurnCapacityCompactState(
+    const state = new MidTurnCapacityCompactState(
       headAnchor,
       priorContentEvents,
       input.runtimeContextRunHeaders ?? [],
       resolveSelectedModelContextWindow(this.input.connection, this.input.modelId),
     );
+    // Seed the turn's FIRST request with the last request the provider
+    // actually counted, so step 0 is estimated like every later step instead
+    // of guessing the whole payload at char/4.
+    const persisted = persistedRequestAnchor(
+      input.runtimeContext ?? [],
+      input.runtimeContextRunHeaders ?? [],
+      this.input.modelId,
+      this.targetConnectionId,
+    );
+    if (persisted) {
+      state.lastRequestInputTokens = persisted.inputTokens;
+      state.lastRequestPayloadChars = persisted.payloadChars;
+    }
+    return state;
   }
 
   /**
@@ -917,14 +932,21 @@ export class AiSdkCompaction {
       // request's chars would under-estimate the retry by the whole previous
       // step growth — so a missing baseline forces the whole-payload cold
       // start, exactly like a missing usage sample.
-      const lastStepInputTokens = options.completedSteps.at(-1)?.usage?.inputTokens;
-      state.lastRequestInputTokens =
-        state.lastRequestPayloadChars !== undefined &&
-        lastStepInputTokens !== undefined &&
-        Number.isFinite(lastStepInputTokens) &&
-        lastStepInputTokens > 0
-          ? lastStepInputTokens
-          : undefined;
+      //
+      // Before the first step finishes there is no in-send sample to read and
+      // nothing in-send has overwritten the baseline either, so the pair is
+      // still whatever the previous turn's last request left seeded — leave it
+      // alone rather than clearing an anchor that is coherent.
+      if (options.completedSteps.length > 0) {
+        const lastStepInputTokens = options.completedSteps.at(-1)?.usage?.inputTokens;
+        state.lastRequestInputTokens =
+          state.lastRequestPayloadChars !== undefined &&
+          lastStepInputTokens !== undefined &&
+          Number.isFinite(lastStepInputTokens) &&
+          lastStepInputTokens > 0
+            ? lastStepInputTokens
+            : undefined;
+      }
 
       // A skipped trigger is never silent: every failure-driven skip records a
       // failedOpen decision.
@@ -972,10 +994,7 @@ export class AiSdkCompaction {
       const estimate =
         forcedEstimate ??
         estimateNextRequestTokens({
-          ...(state.lastRequestInputTokens !== undefined
-            ? { priorUsageTokens: state.lastRequestInputTokens }
-            : {}),
-          appendedChars: payloadChars - (state.lastRequestPayloadChars ?? payloadChars),
+          ...requestEstimateAnchor(state, payloadChars),
           charsPerToken,
           coldStartChars: payloadChars,
         });
@@ -1416,8 +1435,11 @@ export class AiSdkCompaction {
     // Reset the baseline: the capacity hook's usage anchor is only coherent
     // paired with the payload chars of the SAME request, and a missing
     // baseline forces the whole-payload cold-start estimate instead of a
-    // stale pairing against the dead attempt.
+    // stale pairing against the dead attempt. The cross-turn seed goes with
+    // it: falling back to an even older request's anchor pairs worse, not
+    // better.
     state.lastRequestPayloadChars = undefined;
+    state.lastRequestInputTokens = undefined;
     return { messages: outcome.replacementMessages };
   }
 
@@ -1481,10 +1503,7 @@ export class AiSdkCompaction {
       if (state.capacity !== undefined && options.stepNumber >= 1) {
         const estimateFinal = (): number =>
           estimateNextRequestTokens({
-            ...(state.lastRequestInputTokens !== undefined
-              ? { priorUsageTokens: state.lastRequestInputTokens }
-              : {}),
-            appendedChars: payloadChars - (state.lastRequestPayloadChars ?? payloadChars),
+            ...requestEstimateAnchor(state, payloadChars),
             charsPerToken,
             coldStartChars: payloadChars,
           });
@@ -1645,6 +1664,9 @@ export class MidTurnCapacityCompactState {
    * Raw serialized chars of the final provider request. Overflow recovery
    * uses this as its shrink-reference baseline because it must compare the
    * actual rejected projection with a candidate replacement.
+   *
+   * Seeded before the turn's first request from the anchor a previous turn
+   * persisted, so it can describe a request from an earlier send.
    */
   lastRequestPayloadChars: number | undefined;
   /**
@@ -1655,6 +1677,12 @@ export class MidTurnCapacityCompactState {
    * them twice. Undefined when the last step's usage is missing or unusable
    * (no positive input count); estimates then fall back to the whole-payload
    * cold-start path — an unusable sample is unknown, never zero.
+   *
+   * Seeded together with `lastRequestPayloadChars` from the previous turn's
+   * persisted anchor, so before the first step finishes the pair describes the
+   * last request of an earlier send. The two are only ever written and cleared
+   * together: an anchor from one request and a baseline from another is off by
+   * a whole step's growth.
    */
   lastRequestInputTokens: number | undefined;
   /** Latest durable checkpoint (loaded or written) for roll-forward summaries. */
@@ -1725,6 +1753,62 @@ function midTurnRequestPayloadChars(
     requestMessagesChars(messages, charsPerToken) +
     toolSchemaCharsForDiagnostics(providerTools, activeTools)
   );
+}
+
+/**
+ * The newest persisted anchor pair in the prior context: the real input tokens
+ * of some earlier turn's last provider request, with the payload chars measured
+ * for that same request.
+ *
+ * Reverse scan, and the FIRST anchor-bearing usage record decides — an older
+ * anchor describes a request further from the one about to go out, so a
+ * rejected newest anchor means cold start, never a fallback to an older one.
+ * The synthetic `token_usage` a manual `/compact` writes carries no anchor and
+ * is skipped for free.
+ *
+ * The anchor is a token count in the anchoring model's tokenizer, so it only
+ * transfers to a request going to the same model over the same connection.
+ */
+function persistedRequestAnchor(
+  events: readonly RuntimeEvent[],
+  runHeaders: readonly AgentRunHeader[],
+  modelId: string,
+  connectionId: string | undefined,
+): LastRequestAnchor | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    const anchor = event?.actions?.tokenUsage?.lastRequestAnchor;
+    if (!anchor) continue;
+    const header = runHeaders.find((candidate) => candidate.runId === event?.runId);
+    if (!header || header.modelId !== modelId || header.llmConnectionId !== connectionId) {
+      return undefined;
+    }
+    return anchor;
+  }
+  return undefined;
+}
+
+/**
+ * The estimate inputs for the request about to go out: the paired anchor and
+ * the signed char delta against the payload that anchor was reported for.
+ *
+ * A delta wider than the whole payload is the pairing's own alarm — it takes a
+ * baseline more than twice the current payload, which within a send cannot
+ * happen without a restructuring that already resets the baseline, and across a
+ * turn boundary means the prior tail was re-materialized down a different path
+ * than the request the anchor was reported for. A pairing that far off
+ * estimates worse than none, so drop it and let the cold start answer.
+ */
+function requestEstimateAnchor(
+  state: MidTurnCapacityCompactState,
+  payloadChars: number,
+): { priorUsageTokens?: number; appendedChars: number } {
+  const anchor = state.lastRequestInputTokens;
+  const baseline = state.lastRequestPayloadChars;
+  if (anchor === undefined || baseline === undefined) return { appendedChars: 0 };
+  const appendedChars = payloadChars - baseline;
+  if (Math.abs(appendedChars) > payloadChars) return { appendedChars: 0 };
+  return { priorUsageTokens: anchor, appendedChars };
 }
 
 /**
